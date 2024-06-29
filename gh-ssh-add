@@ -1,0 +1,68 @@
+#!/bin/sh
+
+set -euo pipefail
+
+dir=~/.ssh/github.com
+
+name=$(basename "$0")
+
+help=$(printf "\
+usage: %s [-d] [repo]
+       %s -l
+       %s -D
+" "$name" "$name" "$name")
+
+usage() {
+	printf "%s\n" "$help" >&2
+	exit 2
+}
+
+setup() {
+	SSH_AUTH_SOCK=$dir/.agent
+	export SSH_AUTH_SOCK
+	eval "$(ssh-agent -a "$SSH_AUTH_SOCK" 2>/dev/null)"
+	# Create a new agent if the connection fails
+	if [ "$(ssh-add -l 2>/dev/null 1>&2 || echo $?)" = 2 ]; then
+		rm "$SSH_AUTH_SOCK"
+		eval "$(ssh-agent -a "$SSH_AUTH_SOCK" 2>/dev/null)"
+	fi
+}
+
+del=
+while getopts :dlD opt; do
+	case $opt in
+	d) del=1 ;;
+	l) setup && ssh-add -l; exit ;;
+	D) setup && ssh-add -D; exit ;;
+	?) usage
+	esac
+done
+shift $((OPTIND-1))
+
+repo=${1-$(gh repo view --json nameWithOwner -q .nameWithOwner)}
+key=$dir/$repo
+
+if [ "$del" ]; then
+	setup && ssh-add -d "$key"
+	exit
+fi
+
+keys=$(gh repo deploy-key -R "$repo" list | cut -f4)
+
+# Generate key if doesn't exist
+if ! [ -e "$key" ]; then
+	mkdir -p "$(dirname "$key")"
+	ssh-keygen -C "git@github.com:$repo.git" -f "$key"
+fi
+
+# Add to GitHub if doesn't exist
+if ! printf '%s' "$keys" | grep -qxF "$(awk '{print $1,$2}' "$key.pub")"; then
+	gh repo deploy-key -R "$repo" add "$key.pub"
+fi
+
+setup
+
+# Add to agent if doesn't exist
+if ! ssh-add -L | grep -qxF "$(cat "$key.pub")"; then
+	ssh-add "$key"
+fi
